@@ -284,83 +284,106 @@ class yuketang:
                 self.msgmgr.sendMsg(f"{self.lessonIdDict[lessonId]['header']}\n消息: 签到失败\n")
 
     async def fetch_presentation(self, lessonId):
-        url = f"https://{domain}/api/v3/lesson/presentation/fetch?presentation_id={self.lessonIdDict[lessonId]['presentation']}"
-        headers = {
-            "referer": f"https://{domain}/lesson/fullscreen/v3/{lessonId}?source=5",
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/118.0.0.0 Safari/537.36",
-            "cookie": self.cookie,
-            "Authorization": self.lessonIdDict[lessonId]['Authorization']
-        }
-        res=requests.get(url, headers=headers, timeout=timeout)
-        self.setAuthorization(res, lessonId)
-        info = res.json()
-        slides=info['data']['slides']    #获得幻灯片列表
+        lesson = self.lessonIdDict[lessonId]
+        ppt_id = lesson['presentation']
+        if os.path.exists(ppt_id) and os.path.exists(os.path.join(ppt_id, "ppt.json")):
+            with open(os.path.join(ppt_id, "ppt.json"), "r", encoding="utf-8") as f:
+                info = json.load(f)
+        else:
+            url = f"https://{domain}/api/v3/lesson/presentation/fetch?presentation_id={ppt_id}"
+            headers = {
+                "referer": f"https://{domain}/lesson/fullscreen/v3/{lessonId}?source=5",
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/118.0.0.0 Safari/537.36",
+                "cookie": self.cookie,
+                "Authorization": lesson['Authorization']
+            }
+            res=requests.get(url, headers=headers, timeout=timeout)
+            self.setAuthorization(res, lessonId)
+            info = res.json()
+
+        slides = info['data']['slides']    #获得幻灯片列表
         problems = {}
-        self.lessonIdDict[lessonId]['problems']={}
-        self.lessonIdDict[lessonId]['covers']=[slide['index'] for slide in slides if slide.get('cover') is not None]
+        lesson['problems'] = {}
+        lesson['covers'] = [slide['index'] for slide in slides if slide.get('cover') is not None]
         for slide in slides:
             if slide.get("problem") is not None:
-                self.lessonIdDict[lessonId]['problems'][slide['id']]=slide['problem']
-                self.lessonIdDict[lessonId]['problems'][slide['id']]['index']=slide['index']
+                lesson['problems'][slide['id']] = slide['problem']
+                lesson['problems'][slide['id']]['index'] = slide['index']
                 problems[slide['index']] = {"problemType": int(slide['problem']['problemType']), "option_keys": [opt['key'] for opt in slide['problem'].get('options', [])], "option_values": [opt['value'] for opt in slide['problem'].get('options', [])], "num_blanks": len(slide['problem'].get('blanks', [])), "pollingCount": int(slide['problem'].get('pollingCount', 1)), "score": int(slide['problem'].get('score', 0))}
                 if slide['problem']['body'] == '':
                     shapes = slide.get('shapes', [])
                     if shapes:
                         min_left_item = min(shapes, key=lambda item: item.get('Left', 9999999))
                         if min_left_item != 9999999 and min_left_item.get('Text') is not None:
-                            self.lessonIdDict[lessonId]['problems'][slide['id']]['body'] = min_left_item['Text'] or '未知问题'
+                            lesson['problems'][slide['id']]['body'] = min_left_item['Text'] or '未知问题'
                         else:
-                            self.lessonIdDict[lessonId]['problems'][slide['id']]['body'] = '未知问题'
+                            lesson['problems'][slide['id']]['body'] = '未知问题'
                     else:
-                        self.lessonIdDict[lessonId]['problems'][slide['id']]['body'] = '未知问题'
-                problems[slide['index']]['body'] = self.lessonIdDict[lessonId]['problems'][slide['id']]['body'] if self.lessonIdDict[lessonId]['problems'][slide['id']]['body'] != '未知问题' else ''
-        self.msgmgr.sendMsg(f"{self.lessonIdDict[lessonId]['header']}\n{format_json_to_text(self.lessonIdDict[lessonId]['problems'], self.lessonIdDict[lessonId].get('unlockedproblem', []))}")
-        folder_path=self.lessonIdDict[lessonId]['presentation']
+                        lesson['problems'][slide['id']]['body'] = '未知问题'
+                problems[slide['index']]['body'] = lesson['problems'][slide['id']]['body'] if lesson['problems'][slide['id']]['body'] != '未知问题' else ''
+        self.msgmgr.sendMsg(f"{lesson['header']}\n{format_json_to_text(lesson['problems'], lesson.get('unlockedproblem', []))}")
+
         async def fetch_presentation_background():
             loop = asyncio.get_event_loop()
-            await loop.run_in_executor(None, clear_folder, folder_path)
-            with open(os.path.join(folder_path, "ppt.json"), "w", encoding="utf-8") as f:
-                json.dump(info, f, ensure_ascii=False, indent=4)
-            with open(os.path.join(folder_path, "problems.txt"), "w", encoding="utf-8") as f:
-                f.write(str(problems))
-            await loop.run_in_executor(None, download_images_to_folder, slides, folder_path)
-            output_pdf_path=os.path.join(folder_path, self.lessonIdDict[lessonId]['classroomName'].strip() + "-" + self.lessonIdDict[lessonId]['title'].strip() + ".pdf")
-            await loop.run_in_executor(None, images_to_pdf, folder_path, output_pdf_path)
-            if self.ppt:
-                if os.path.exists(output_pdf_path):
-                    try:
-                        self.msgmgr.sendFile(output_pdf_path)
-                    except Exception as e:
-                        self.msgmgr.sendMsg(f"{self.lessonIdDict[lessonId]['header']}\n消息: PPT推送失败\n")
-                else:
-                    self.msgmgr.sendMsg(f"{self.lessonIdDict[lessonId]['header']}\n消息: 没有PPT\n")
+            output_pdf_path = os.path.join(ppt_id, lesson['classroomName'].strip() + "-" + lesson['title'].strip() + ".pdf")
+            if not os.path.exists(ppt_id) or not os.path.exists(output_pdf_path):
+                await loop.run_in_executor(None, clear_folder, ppt_id)
+                with open(os.path.join(ppt_id, "ppt.json"), "w", encoding="utf-8") as f:
+                    json.dump(info, f, ensure_ascii=False, indent=4)
+                await loop.run_in_executor(None, download_images_to_folder, slides, ppt_id)
+                await loop.run_in_executor(None, images_to_pdf, ppt_id, output_pdf_path)
 
+                if self.ppt:
+                    if os.path.exists(output_pdf_path):
+                        try:
+                            self.msgmgr.sendFile(output_pdf_path)
+                        except Exception as e:
+                            self.msgmgr.sendMsg(f"{lesson['header']}\n消息: PPT推送失败\n")
+                    else:
+                        self.msgmgr.sendMsg(f"{lesson['header']}\n消息: 没有PPT\n")
+
+            problems_keys = [int(k) for k in problems.keys()]
+            if not os.path.exists(os.path.join(ppt_id, "problems.txt")):
+                if problems:
+                    await loop.run_in_executor(None, concat_vertical_cv, ppt_id, 0, 100)
+                    await loop.run_in_executor(None, concat_vertical_cv, ppt_id, 1, 100)
+                    await loop.run_in_executor(None, concat_vertical_cv, ppt_id, 2, 100)
+                    await loop.run_in_executor(None, concat_vertical_cv, ppt_id, 3, 100, problems_keys)
+                    await loop.run_in_executor(None, concat_vertical_cv, ppt_id, 4, 100)
+                with open(os.path.join(ppt_id, "problems.txt"), "w", encoding="utf-8") as f:
+                    f.write(str(problems))
+
+            reply = None
             if problems:
-                problems_keys = [int(k) for k in problems.keys()]
-                await loop.run_in_executor(None, concat_vertical_cv, folder_path, 0, 100)
-                await loop.run_in_executor(None, concat_vertical_cv, folder_path, 1, 100)
-                await loop.run_in_executor(None, concat_vertical_cv, folder_path, 2, 100)
-                await loop.run_in_executor(None, concat_vertical_cv, folder_path, 3, 100, problems_keys)
-                await loop.run_in_executor(None, concat_vertical_cv, folder_path, 4, 100)
-                if self.llm:
-                    reply = await loop.run_in_executor(None, LLMManager().generateAnswer, folder_path)
+                if os.path.exists(os.path.join(ppt_id, "reply.txt")):
+                    with open(os.path.join(ppt_id, "reply.txt"), "r", encoding="utf-8") as f:
+                        reply = ast.literal_eval(f.read().strip())
+                elif self.llm:
+                    reply = await loop.run_in_executor(None, LLMManager().generateAnswer, ppt_id)
+                    with open(os.path.join(ppt_id, "reply.txt"), "w", encoding="utf-8") as f:
+                        f.write(str(reply))
+                if reply is not None:
                     reply_text = "LLM答案列表:\n"
                     for key in problems_keys:
                         reply_text += "-"*20 + "\n"
-                        problemId = next((pid for pid, prob in self.lessonIdDict[lessonId]['problems'].items() if prob.get('index') == key), None)
-                        problemType = {1:"单选题", 2:"多选题", 3:"投票题", 4:"填空题", 5:"主观题"}.get(self.lessonIdDict[lessonId]['problems'][problemId]['problemType'], "其它题型")
-                        reply_text += f"PPT: 第{key}页 {problemType} {fmt_num(self.lessonIdDict[lessonId]['problems'][problemId].get('score', 0))}分\n"
+                        problemType = {1:"单选题", 2:"多选题", 3:"投票题", 4:"填空题", 5:"主观题"}.get(problems[key]['problemType'], "其它题型")
+                        reply_text += f"PPT: 第{key}页 {problemType} {fmt_num(problems[key].get('score', 0))}分\n"
                         if reply['best_answer'].get(key):
-                            self.lessonIdDict[lessonId]['problems'][problemId]['llm_answer'] = reply['best_answer'][key]
+                            if self.lessonIdDict[lessonId].get('presentation', 0) == ppt_id:
+                                problemId = next((pid for pid, prob in lesson['problems'].items() if prob.get('index') == key), None)
+                                self.lessonIdDict[lessonId]['problems'][problemId]['llm_answer'] = reply['best_answer'][key]
                             reply_text += f"最佳答案: {reply['best_answer'][key]}\n所有答案:\n"
                             for r in reply["result"]:
                                 if r["answer_dict"].get(key):
                                     reply_text += f"[{r['score']}, {r['usedTime']}] {r['name']}: {r['answer_dict'][key]}\n"
                         else:
                             reply_text += f"无答案\n"
-                    self.msgmgr.sendMsg(f"{self.lessonIdDict[lessonId]['header']}\n消息: {reply_text}")
+                    self.msgmgr.sendMsg(f"{lesson['header']}\n消息: {reply_text}")
 
-        asyncio.create_task(fetch_presentation_background())
+        if self.lessonIdDict[lessonId].get('presentation', 0) == ppt_id:
+            self.lessonIdDict[lessonId]['problems'] = lesson['problems']
+            self.lessonIdDict[lessonId]['covers'] = lesson['covers']
+            asyncio.create_task(fetch_presentation_background())
 
     def answer(self,lessonId):
         url=f"https://{domain}/api/v3/lesson/problem/answer"
