@@ -93,18 +93,42 @@ python main.py
 ```json
 {
     "yuketang": {
-        "domain": "pro.yuketang.cn",
-        "classroomCodeList": ["JZOJ5C", "G84UAB"],
-        "classroomWhiteList": [],
-        "classroomBlackList": ["未央.机器学习", "未央.深度学习"],
-        "classroomStartTimeDict": {
-            "未央.机器学习": {"1": "08:00", "2": "13:30"},
-            "未央.深度学习": {"1": "13:30"}
-        },
-        "llm": false,
-        "an": false,
-        "ppt": false,
-        "si": false,
+        "users": [
+            {
+                "name": "user1",
+                "enabled": false,
+                "domain": "pro.yuketang.cn",
+                "classroomCodeList": ["YVQ6QC", "7DEN3A"],
+                "classroomWhiteList": [],
+                "classroomBlackList": ["未央.机器学习", "未央.深度学习"],
+                "classroomStartTimeDict": {
+                    "未央.机器学习": {"1": "08:00", "2": "13:30"},
+                    "未央.深度学习": {"1": "13:30"}
+                },
+                "llm": false,
+                "an": false,
+                "ppt": false,
+                "si": false,
+                "services": ["dingtalk", "feishu"]
+            },
+            {
+                "name": "user2",
+                "enabled": false,
+                "domain": "pro.yuketang.cn",
+                "classroomCodeList": ["YVQ6QC", "7DEN3A"],
+                "classroomWhiteList": [],
+                "classroomBlackList": ["未央.机器学习", "未央.深度学习"],
+                "classroomStartTimeDict": {
+                    "未央.机器学习": {"1": "08:00", "2": "13:30"},
+                    "未央.深度学习": {"1": "13:30"}
+                },
+                "llm": false,
+                "an": false,
+                "ppt": false,
+                "si": false,
+                "services": ["dingtalk", "feishu"]
+            }
+        ],
         "timeout": 30
     },
     "send": {
@@ -417,13 +441,15 @@ python main.py
 
  - 首次运行将下载、发送并在终端展示雨课堂登录二维码，微信扫码获取 cookie，有效期约两周；有效期少于两天时，每小时初将发送二维码提醒，请及时扫码更新，谨防失效后消息轰炸
 
+ - 支持多用户配置，每个用户独立运行，互不影响
+
  - 支持多线程监听，每 30 秒扫描新课堂、尝试使用班级邀请码/课堂暗号加入新班级，随后自动签到、下载课件（PDF）、打印题目、生成并打印答案、获取 PPT 进度、自动答题等
 
  - 签到方式为通过“正在上课”提示进入课堂
 
- - 答案已无法从雨课堂前端获取，现改用大语言模型生成
+ - 答案已无法从雨课堂前端获取，现改用**大语言模型**生成
 
- - 自动答题支持单选题、多选题、投票题、填空题和主观题；若未获取到答案，将提交默认答案（可修改[此处](yuketang.py#L403-L414)）
+ - 自动答题支持单选题、多选题、投票题、填空题和主观题；若未获取到答案，将提交默认答案（可修改[此处](yuketang.py#L458-L469)）
 
  - 课程名可在雨课堂首页的课程标签里查找，具体如图中红框所示
 
@@ -436,9 +462,21 @@ python main.py
 ### yuketang
 
 <details>
-<summary><code>domain</code></summary>
+<summary><code>users</code></summary>
 
-雨课堂域名
+用户配置列表。参数如下：
+
+ - <code>name</code>
+
+用于标识用户，自定义
+
+ - <code>enabled</code>
+
+是否启用该用户
+
+ - <code>domain</code>
+
+雨课堂域名，按需选择
 | 网站 | 域名 |
 | -------- | -------- |
 | 雨课堂 | [www.yuketang.cn](https://www.yuketang.cn) |
@@ -446,61 +484,41 @@ python main.py
 | 长江雨课堂 | [changjiang.yuketang.cn](https://changjiang.yuketang.cn) |
 | 黄河雨课堂 | [huanghe.yuketang.cn](https://huanghe.yuketang.cn) |
 
-</details>
-
-<details>
-<summary><code>classroomCodeList</code></summary>
+ - <code>classroomCodeList</code>
 
 班级邀请码/课堂暗号列表。每 30 秒尝试加入相应班级，班级满员时可启用此功能待成员退出抢占名额
 
-</details>
-
-<details>
-<summary><code>classroomWhiteList</code></summary>
+ - <code>classroomWhiteList</code>
 
 课程白名单。记录课程名，优先级低于黑名单，课程名采用完全匹配，为空时不启用
 
-</details>
-
-<details>
-<summary><code>classroomBlackList</code></summary>
+ - <code>classroomBlackList</code>
 
 课程黑名单。记录课程名，优先级高于白名单，课程名采用完全匹配，为空时不启用
 
-</details>
-
-<details>
-<summary><code>classroomStartTimeDict</code></summary>
+ - <code>classroomStartTimeDict</code>
 
 课程星期内各日最早进入时间。课程名采用完全匹配；使用指定时区，周一-周日对应 `1 - 7`，时间格式为 `HH:MM`；当日时间值不为空且此时早于该值不签到，数字或时间为空不启用
 
-</details>
-
-<details>
-<summary><code>llm</code></summary>
+ - <code>llm</code>
 
 是否使用大语言模型生成答案
 
-</details>
-
-<details>
-<summary><code>an</code></summary>
+ - <code>an</code>
 
 是否自动答题
 
-</details>
-
-<details>
-<summary><code>ppt</code></summary>
+ - <code>ppt</code>
 
 是否发送 PPT 文件
 
-</details>
-
-<details>
-<summary><code>si</code></summary>
+ - <code>si</code>
 
 是否实时推送 PPT 进度
+
+ - <code>services</code>
+
+推送服务名称列表，填写 `send.services` 中配置的 `name`
 
 </details>
 
