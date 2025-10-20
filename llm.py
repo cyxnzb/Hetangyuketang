@@ -228,42 +228,42 @@ def convert_answer_to_dict(answer, problems):
                 tp = problems[page]['problemType']
                 if tp == 1:
                     if not isinstance(answer_dict[page], list):
-                        print(f"答案格式错误,第{page}页应为单选题,答案应为只含一个选项的列表")
+                        print(f"答案格式错误, 第{page}页应为单选题, 答案应为只含一个选项的列表")
                         continue
                     options = [opt for opt in problems[page]['option_keys'] if opt in answer_dict[page]]
                     if options:
                         all_answers[page].append([options[0]])
                 elif tp == 2:
                     if not isinstance(answer_dict[page], list):
-                        print(f"答案格式错误,第{page}页应为多选题,答案应为含一个或多个选项的列表")
+                        print(f"答案格式错误, 第{page}页应为多选题, 答案应为含一个或多个选项的列表")
                         continue
                     options = [opt for opt in problems[page]['option_keys'] if opt in answer_dict[page]]
                     if options:
                         all_answers[page].append(options)
                 elif tp == 3:
                     if not isinstance(answer_dict[page], list):
-                        print(f"答案格式错误,第{page}页应为投票题,答案应为含一个或多个选项的列表")
+                        print(f"答案格式错误, 第{page}页应为投票题, 答案应为含一个或多个选项的列表")
                         continue
                     options = [opt for opt in problems[page]['option_keys'] if opt in answer_dict[page]]
                     if options and len(options) <= problems[page]['pollingCount']:
                         all_answers[page].append(options)
                 elif tp == 4:
                     if not isinstance(answer_dict[page], list) or len(answer_dict[page]) != problems[page]["num_blanks"]:
-                        print(f"答案格式错误,第{page}页应为填空题,答案应为含{problems[page].get('num_blanks', 1)}个答案的列表")
+                        print(f"答案格式错误, 第{page}页应为填空题, 答案应为含{problems[page].get('num_blanks', 1)}个答案的列表")
                         continue
                     all_answers[page].append([ans.strip() for ans in answer_dict[page]])
                 elif tp == 5:
                     if not isinstance(answer_dict[page], list) or len(answer_dict[page]) != 1:
-                        print(f"答案格式错误,第{page}页应为主观题,答案应为只含一个答案的列表")
+                        print(f"答案格式错误, 第{page}页应为主观题, 答案应为只含一个答案的列表")
                         continue
                     all_answers[page].append([ans.strip() for ans in answer_dict[page]])
                 else:
                     if not isinstance(answer_dict[page], list) or len(answer_dict[page]) < 1:
-                        print(f"答案格式错误,第{page}页应为其它题型,答案应为含合适答案的列表")
+                        print(f"答案格式错误, 第{page}页应为其它题型, 答案应为含合适答案的列表")
                         continue
                     all_answers[page].append([ans.strip() for ans in answer_dict[page]])
         except Exception as e:
-            print(f"答案格式错误,无法解析: {e}")
+            print(f"答案格式错误, 无法解析: {e}")
     for page in pages:
         if not all_answers.get(page): continue
         tp = problems[page]['problemType']
@@ -1330,19 +1330,22 @@ def generate_cohere_answer(query, folder, config):
 
 if __name__ == "__main__":
     folder = "1529274209982060032"
-    with open(os.path.join(folder, "problems.txt"), "r", encoding="utf-8") as f:
-        problems = ast.literal_eval(f.read().strip())
+    if os.path.exists(os.path.join(folder, "problems.txt")):
+        with open(os.path.join(folder, "problems.txt"), "r", encoding="utf-8") as f:
+            problems = ast.literal_eval(f.read().strip())
+    else:
+        problems = {}
     reply = LLMManager().generateAnswer(folder)
-    reply_text = "LLM答案列表:\n"
+    reply_text = "LLM答案列表:"
     for key in problems.keys():
-        reply_text += "-"*20 + "\n"
-        problemType = {1:"单选题", 2:"多选题", 3:"投票题", 4:"填空题", 5:"主观题"}.get(problems[key]['problemType'], "其它题型")
-        reply_text += f"PPT: 第{key}页 {problemType} {format(float(problems[key].get('score', 0))/100.0, '.15f').rstrip('0').rstrip('.') or '0'}分\n"
+        reply_text += "\n" + "-"*20
+        problemType = {1: "单选题", 2: "多选题", 3: "投票题", 4: "填空题", 5: "主观题"}.get(problems[key]['problemType'], "其它题型")
+        reply_text += f"\nPPT: 第{key}页 {problemType} {format(float(problems[key].get('score', 0))/100.0, '.15f').rstrip('0').rstrip('.') or '0'}分"
         if reply['best_answer'].get(key):
-            reply_text += f"最佳答案: {reply['best_answer'][key]}\n所有答案:\n"
+            reply_text += f"\n最佳答案: {reply['best_answer'][key]}\n所有答案:"
             for r in reply["result"]:
                 if r["answer_dict"].get(key):
-                    reply_text += f"[{r['score']}, {r['usedTime']}] {r['name']}: {r['answer_dict'][key]}\n"
+                    reply_text += f"\n[{r['score']}, {r['usedTime']}] {r['name']}: {r['answer_dict'][key]}"
         else:
-            reply_text += f"无答案\n"
+            reply_text += f"\n无答案"
     print(reply_text)
