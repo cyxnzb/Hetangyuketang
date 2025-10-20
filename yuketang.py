@@ -4,8 +4,10 @@ import json
 import requests
 import os
 import time
-import traceback
-from collections import deque
+import re
+import ast
+from datetime import datetime
+from weakref import WeakValueDictionary
 from util import *
 from send import *
 from llm import *
@@ -20,54 +22,24 @@ with open('config.json', 'r', encoding='utf-8') as f:
 timeout = config['yuketang']['timeout']
 users = config['yuketang']['users']
 
-class FifoAsyncLock:
-    def __init__(self):
-        self._locked = False
-        self._waiters = deque()
-    async def acquire(self):
-        loop = asyncio.get_running_loop()
-        fut = loop.create_future()
-        self._waiters.append(fut)
-        if self._waiters[0] is fut and not self._locked:
-            self._locked = True
-            fut.set_result(True)
-        await fut
-    def release(self):
-        if not self._locked:
-            return
-        self._waiters.popleft()
-        if self._waiters:
-            fut = self._waiters[0]
-            self._locked = True
-            if not fut.done():
-                fut.set_result(True)
-        else:
-            self._locked = False
-    async def __aenter__(self):
-        await self.acquire()
-        return self
-    async def __aexit__(self, exc_type, exc, tb):
-        self.release()
+_FETCH_LOCKS_1 = WeakValueDictionary()
+_FETCH_LOCKS_2 = WeakValueDictionary()
 
-class KeyedFifoAsyncLock:
-    def __init__(self):
-        self._locks = {}
-    def _get(self, key):
-        return self._locks.setdefault(key, FifoAsyncLock())
-    def __call__(self, key):
-        manager = self
-        lock = self._get(key)
-        class _Ctx:
-            async def __aenter__(self_inner):
-                await lock.acquire()
-                return lock
-            async def __aexit__(self_inner, exc_type, exc, tb):
-                lock.release()
-                if not lock._locked and not lock._waiters and manager._locks.get(key) is lock:
-                    del manager._locks[key]
-        return _Ctx()
+def _get_fetch_lock_1(lessonId):
+    key = str(lessonId)
+    lock = _FETCH_LOCKS_1.get(key)
+    if lock is None:
+        new_lock = asyncio.Lock()
+        lock = _FETCH_LOCKS_1.setdefault(key, new_lock)
+    return lock
 
-_FETCH_PRESENTATION_LOCK = KeyedFifoAsyncLock()
+def _get_fetch_lock_2(lessonId):
+    key = str(lessonId)
+    lock = _FETCH_LOCKS_2.get(key)
+    if lock is None:
+        new_lock = asyncio.Lock()
+        lock = _FETCH_LOCKS_2.setdefault(key, new_lock)
+    return lock
 
 class yuketang:
     def __init__(self, yt_config):
@@ -100,36 +72,36 @@ class yuketang:
         while True:
             if not os.path.exists(f"cookie_{self.name}.txt"):
                 flag = 1
-                self.msgmgr.sendMsg("正在第一次获取登录cookie, 请微信扫码")
+                await asyncio.to_thread(self.msgmgr.sendMsg, "正在第一次获取登录cookie, 请微信扫码")
                 await self.ws_controller(self.ws_login, retries=1000, delay=1)
             if not self.cookie:
                 flag = 1
                 read_cookie()
             if self.cookieTime and not check_time(self.cookieTime, 0):
                 flag = 1
-                self.msgmgr.sendMsg("cookie已失效, 请重新扫码")
+                await asyncio.to_thread(self.msgmgr.sendMsg, "cookie已失效, 请重新扫码")
                 await self.ws_controller(self.ws_login, retries=1000, delay=1)
                 read_cookie()
                 continue
             elif self.cookieTime and (not check_time(self.cookieTime, 2880) and datetime.now().minute < 5 or not check_time(self.cookieTime, 120)):
                 flag = 1
-                self.msgmgr.sendMsg(f"cookie有效至{self.cookieTime}, 即将失效, 请重新扫码")
+                await asyncio.to_thread(self.msgmgr.sendMsg, f"cookie有效至{self.cookieTime}, 即将失效, 请重新扫码")
                 await self.ws_controller(self.ws_login, retries=0, delay=1)
                 read_cookie()
                 continue
             code = self.check_cookie()
             if code == 1:
                 flag = 1
-                self.msgmgr.sendMsg("cookie已失效, 请重新扫码")
+                await asyncio.to_thread(self.msgmgr.sendMsg, "cookie已失效, 请重新扫码")
                 await self.ws_controller(self.ws_login, retries=1000, delay=1)
                 read_cookie()
             elif code == 0:
                 if self.cookieTime and flag == 1 and check_time(self.cookieTime, 2880):
-                    self.msgmgr.sendMsg(f"cookie有效至{self.cookieTime}")
+                    await asyncio.to_thread(self.msgmgr.sendMsg, f"cookie有效至{self.cookieTime}")
                 elif self.cookieTime and flag == 1:
-                    self.msgmgr.sendMsg(f"cookie有效至{self.cookieTime}, 即将失效, 下个小时初注意扫码")
+                    await asyncio.to_thread(self.msgmgr.sendMsg, f"cookie有效至{self.cookieTime}, 即将失效, 下个小时初注意扫码")
                 elif flag == 1:
-                    self.msgmgr.sendMsg("cookie有效, 有效期未知")
+                    await asyncio.to_thread(self.msgmgr.sendMsg, "cookie有效, 有效期未知")
                 break
 
     def web_login(self, UserID, Auth):
@@ -270,15 +242,14 @@ class yuketang:
         try:
             online_data = requests.get(url=url, headers=headers, timeout=timeout).json()
         except:
-            return False
+            return (False, [])
         try:
+            to_close_ids = []
             self.lessonIdNewList = []
             if online_data['data']['onLessonClassrooms'] == []:
-                for lessonId in self.lessonIdDict:
-                    websocket = self.lessonIdDict[lessonId].get('websocket')
-                    if websocket: websocket.close()
-                self.lessonIdDict = {}
-                return False
+                to_close_ids = list(self.lessonIdDict.keys())
+                return (False, to_close_ids)
+            
             for item in online_data['data']['onLessonClassrooms']:
                 if (self.classroomWhiteList and item['classroomName'] not in self.classroomWhiteList) or item['classroomName'] in self.classroomBlackList or (self.classroomStartTimeDict and item['classroomName'] in self.classroomStartTimeDict and not check_time2(self.classroomStartTimeDict[item['classroomName']])):
                     continue
@@ -289,19 +260,19 @@ class yuketang:
                     self.lessonIdDict[lessonId]['startTime'] = time.time()
                     self.lessonIdDict[lessonId]['classroomName'] = item['classroomName']
                 self.lessonIdDict[lessonId]['active'] = '1'
+
             to_delete = [lessonId for lessonId, details in self.lessonIdDict.items() if details.get('active', '0') != '1']
-            for lessonId in to_delete:
-                websocket = self.lessonIdDict[lessonId].get('websocket')
-                if websocket: websocket.close()
-                del self.lessonIdDict[lessonId]
+            to_close_ids.extend(to_delete)
+
             for lessonId in self.lessonIdDict:
                 self.lessonIdDict[lessonId]['active'] = '0'
+
             if self.lessonIdNewList:
-                return True
+                return (True, to_close_ids)
             else:
-                return False
+                return (False, to_close_ids)
         except:
-            return False
+            return (False, [])
 
     def lesson_checkin(self):
         for lessonId in self.lessonIdNewList:
@@ -337,7 +308,8 @@ class yuketang:
                 self.msgmgr.sendMsg(f"{self.lessonIdDict[lessonId]['header']}\n消息: 签到失败")
 
     async def fetch_presentation(self, lessonId):
-        async with _FETCH_PRESENTATION_LOCK(lessonId):  # 同一 lessonId 串行，跨 lessonId 并行
+        await asyncio.sleep(1)
+        async with _get_fetch_lock_1(lessonId):  # 同一 lessonId 串行，跨 lessonId 并行
             if lessonId not in self.lessonIdDict: return
             lesson = self.lessonIdDict[lessonId]
             ppt_id = lesson['presentation']
@@ -352,7 +324,7 @@ class yuketang:
                     "cookie": self.cookie,
                     "Authorization": lesson['Authorization']
                 }
-                res=requests.get(url, headers=headers, timeout=timeout)
+                res = await asyncio.to_thread(requests.get, url, headers=headers, timeout=timeout)
                 self.set_authorization(res, lessonId)
                 info = res.json()
 
@@ -369,76 +341,75 @@ class yuketang:
                         shapes = slide.get('shapes', [])
                         if shapes:
                             min_left_item = min(shapes, key=lambda item: item.get('Left', 9999999))
-                            if min_left_item != 9999999 and min_left_item.get('Text') is not None:
+                            left_val = min_left_item.get('Left', 9999999)
+                            if left_val != 9999999 and min_left_item.get('Text') is not None:
                                 lesson['problems'][slide['id']]['body'] = min_left_item['Text'] or '未知问题'
                             else:
                                 lesson['problems'][slide['id']]['body'] = '未知问题'
                         else:
                             lesson['problems'][slide['id']]['body'] = '未知问题'
                     problems[slide['index']]['body'] = lesson['problems'][slide['id']]['body'] if lesson['problems'][slide['id']]['body'] != '未知问题' else ''
-            self.msgmgr.sendMsg(f"{lesson['header']}\n{format_json_to_text(lesson['problems'], lesson.get('unlockedproblem', []))}")
+            await asyncio.to_thread(self.msgmgr.sendMsg, f"{lesson['header']}\n{format_json_to_text(lesson['problems'], lesson.get('unlockedproblem', []))}")
+            if self.lessonIdDict.get(lessonId, {}).get('presentation', 0) != ppt_id: return
+            self.lessonIdDict[lessonId]['problems'] = lesson['problems']
+            self.lessonIdDict[lessonId]['covers'] = lesson['covers']
 
-            async def fetch_presentation_background():
-                loop = asyncio.get_event_loop()
-                output_pdf_path = os.path.join(ppt_id, lesson['classroomName'].strip() + "-" + lesson['title'].strip() + ".pdf")
-                if not os.path.exists(ppt_id) or not os.path.exists(output_pdf_path):
-                    await loop.run_in_executor(None, clear_folder, ppt_id)
-                    with open(os.path.join(ppt_id, "ppt.json"), "w", encoding="utf-8") as f:
-                        json.dump(info, f, ensure_ascii=False, indent=4)
-                    await loop.run_in_executor(None, download_images_to_folder, slides, ppt_id)
-                    await loop.run_in_executor(None, images_to_pdf, ppt_id, output_pdf_path)
+        async with _get_fetch_lock_2(lessonId):  # 同一 lessonId 串行，跨 lessonId 并行
+            if self.lessonIdDict.get(lessonId, {}).get('presentation', 0) != ppt_id: return
+            output_pdf_path = os.path.join(ppt_id, lesson['classroomName'].strip() + "-" + lesson['title'].strip() + ".pdf")
+            if not os.path.exists(ppt_id) or not os.path.exists(output_pdf_path):
+                await asyncio.to_thread(clear_folder, ppt_id)
+                with open(os.path.join(ppt_id, "ppt.json"), "w", encoding="utf-8") as f:
+                    json.dump(info, f, ensure_ascii=False, indent=4)
+                await asyncio.to_thread(download_images_to_folder, slides, ppt_id)
+                await asyncio.to_thread(images_to_pdf, ppt_id, output_pdf_path)
 
-                    if self.ppt:
-                        if os.path.exists(output_pdf_path):
-                            try:
-                                self.msgmgr.sendFile(output_pdf_path)
-                            except:
-                                self.msgmgr.sendMsg(f"{lesson['header']}\n消息: PPT推送失败")
-                        else:
-                            self.msgmgr.sendMsg(f"{lesson['header']}\n消息: 没有PPT")
+                if self.ppt:
+                    if os.path.exists(output_pdf_path):
+                        try:
+                            await asyncio.to_thread(self.msgmgr.sendFile, output_pdf_path)
+                        except:
+                            await asyncio.to_thread(self.msgmgr.sendMsg, f"{lesson['header']}\n消息: PPT推送失败")
+                    else:
+                        await asyncio.to_thread(self.msgmgr.sendMsg, f"{lesson['header']}\n消息: 没有PPT")
 
-                problems_keys = [int(k) for k in problems.keys()]
-                if not os.path.exists(os.path.join(ppt_id, "problems.txt")):
-                    if problems:
-                        await loop.run_in_executor(None, concat_vertical_cv, ppt_id, 0, 100)
-                        await loop.run_in_executor(None, concat_vertical_cv, ppt_id, 1, 100)
-                        await loop.run_in_executor(None, concat_vertical_cv, ppt_id, 2, 100)
-                        await loop.run_in_executor(None, concat_vertical_cv, ppt_id, 3, 100, problems_keys)
-                        await loop.run_in_executor(None, concat_vertical_cv, ppt_id, 4, 100)
-                    with open(os.path.join(ppt_id, "problems.txt"), "w", encoding="utf-8") as f:
-                        f.write(str(problems))
-
-                reply = None
+            problems_keys = [int(k) for k in problems.keys()]
+            if not os.path.exists(os.path.join(ppt_id, "problems.txt")):
                 if problems:
-                    if os.path.exists(os.path.join(ppt_id, "reply.txt")):
-                        with open(os.path.join(ppt_id, "reply.txt"), "r", encoding="utf-8") as f:
-                            reply = ast.literal_eval(f.read().strip())
-                    elif self.llm:
-                        reply = await loop.run_in_executor(None, LLMManager().generateAnswer, ppt_id)
-                        with open(os.path.join(ppt_id, "reply.txt"), "w", encoding="utf-8") as f:
-                            f.write(str(reply))
-                    if reply is not None:
-                        reply_text = "LLM答案列表:"
-                        for key in problems_keys:
-                            reply_text += "\n" + "-"*20
-                            problemType = {1: "单选题", 2: "多选题", 3: "投票题", 4: "填空题", 5: "主观题"}.get(problems[key]['problemType'], "其它题型")
-                            reply_text += f"\nPPT: 第{key}页 {problemType} {fmt_num(problems[key].get('score', 0))}分"
-                            if reply['best_answer'].get(key):
-                                if self.lessonIdDict.get(lessonId, {}).get('presentation', 0) == ppt_id:
-                                    problemId = next((pid for pid, prob in lesson['problems'].items() if prob.get('index') == key), None)
-                                    self.lessonIdDict[lessonId]['problems'][problemId]['llm_answer'] = reply['best_answer'][key]
-                                reply_text += f"\n最佳答案: {reply['best_answer'][key]}\n所有答案:"
-                                for r in reply["result"]:
-                                    if r["answer_dict"].get(key):
-                                        reply_text += f"\n[{r['score']}, {r['usedTime']}] {r['name']}: {r['answer_dict'][key]}"
-                            else:
-                                reply_text += f"\n无答案"
-                        self.msgmgr.sendMsg(f"{lesson['header']}\n消息: {reply_text}")
+                    await asyncio.to_thread(concat_vertical_cv, ppt_id, 0, 100)
+                    await asyncio.to_thread(concat_vertical_cv, ppt_id, 1, 100)
+                    await asyncio.to_thread(concat_vertical_cv, ppt_id, 2, 100)
+                    await asyncio.to_thread(concat_vertical_cv, ppt_id, 3, 100, problems_keys)
+                    await asyncio.to_thread(concat_vertical_cv, ppt_id, 4, 100)
+                with open(os.path.join(ppt_id, "problems.txt"), "w", encoding="utf-8") as f:
+                    f.write(str(problems))
 
-            if self.lessonIdDict.get(lessonId, {}).get('presentation', 0) == ppt_id:
-                self.lessonIdDict[lessonId]['problems'] = lesson['problems']
-                self.lessonIdDict[lessonId]['covers'] = lesson['covers']
-                asyncio.create_task(fetch_presentation_background())
+            reply = None
+            if problems:
+                if os.path.exists(os.path.join(ppt_id, "reply.txt")):
+                    with open(os.path.join(ppt_id, "reply.txt"), "r", encoding="utf-8") as f:
+                        reply = ast.literal_eval(f.read().strip())
+                elif self.llm:
+                    reply = await asyncio.to_thread(LLMManager().generateAnswer, ppt_id)
+                    with open(os.path.join(ppt_id, "reply.txt"), "w", encoding="utf-8") as f:
+                        f.write(str(reply))
+                if reply is not None:
+                    reply_text = "LLM答案列表:"
+                    for key in problems_keys:
+                        reply_text += "\n" + "-"*20
+                        problemType = {1: "单选题", 2: "多选题", 3: "投票题", 4: "填空题", 5: "主观题"}.get(problems[key]['problemType'], "其它题型")
+                        reply_text += f"\nPPT: 第{key}页 {problemType} {fmt_num(problems[key].get('score', 0))}分"
+                        if reply['best_answer'].get(key):
+                            if self.lessonIdDict.get(lessonId, {}).get('presentation', 0) == ppt_id:
+                                problemId = next((pid for pid, prob in lesson['problems'].items() if prob.get('index') == key), None)
+                                self.lessonIdDict[lessonId]['problems'][problemId]['llm_answer'] = reply['best_answer'][key]
+                            reply_text += f"\n最佳答案: {reply['best_answer'][key]}\n所有答案:"
+                            for r in reply["result"]:
+                                if r["answer_dict"].get(key):
+                                    reply_text += f"\n[{r['score']}, {r['usedTime']}] {r['name']}: {r['answer_dict'][key]}"
+                        else:
+                            reply_text += f"\n无答案"
+                    await asyncio.to_thread(self.msgmgr.sendMsg, f"{lesson['header']}\n消息: {reply_text}")
 
     def answer(self, lessonId):
         url = f"https://{self.domain}/api/v3/lesson/problem/answer"
@@ -473,6 +444,7 @@ class yuketang:
             "problemType": tp,
             "result": answer if tp != 5 else {"content": answer[0], "pics": [{"pic": "", "thumb": ""}]}
         }
+        res = None
         try:
             retries = 3
             while retries > 0:
@@ -483,8 +455,9 @@ class yuketang:
                 else:
                     break
         except:
-            return
-        self.set_authorization(res, lessonId)
+            pass
+        if res is not None:
+            self.set_authorization(res, lessonId)
         self.msgmgr.sendMsg(f"{self.lessonIdDict[lessonId]['header']}\nPPT: 第{self.lessonIdDict[lessonId]['problems'][self.lessonIdDict[lessonId]['problemId']]['index']}页 {problemType} {fmt_num(self.lessonIdDict[lessonId]['problems'][self.lessonIdDict[lessonId]['problemId']].get('score', 0))}分\n问题: {self.lessonIdDict[lessonId]['problems'][self.lessonIdDict[lessonId]['problemId']]['body']}\n提交答案: {answer}")
 
     async def ws_controller(self, func, *args, retries=3, delay=10):
@@ -494,11 +467,10 @@ class yuketang:
                 await func(*args)
                 return  # 如果成功就直接返回
             except:
-                print(traceback.format_exc())
                 attempt += 1
                 if attempt <= retries:
                     await asyncio.sleep(delay)
-                    print(f"出现异常, 尝试重试 ({attempt}/{retries})")
+                    print(f"重试 ({attempt}/{retries})")
 
     async def ws_login(self):
         uri = f"wss://{self.domain}/wsapp/"
@@ -514,8 +486,8 @@ class yuketang:
             await websocket.send(json.dumps(hello_message))
             server_response = await recv_json(websocket)
             qrcode_url = server_response['ticket']
-            download_qrcode(qrcode_url)
-            self.msgmgr.sendImage("qrcode.jpg")
+            download_qrcode(qrcode_url, self.name)
+            await asyncio.to_thread(self.msgmgr.sendImage, "qrcode.jpg")
             server_response = await asyncio.wait_for(recv_json(websocket), timeout=60)
             self.web_login(server_response['UserID'], server_response['Auth'])
 
@@ -543,68 +515,68 @@ class yuketang:
             }
             await websocket.send(json.dumps(hello_message))
             self.lessonIdDict[lessonId]['websocket'] = websocket
-            while True and time.time()-self.lessonIdDict[lessonId]['startTime']<36000:
+            while True and time.time() - self.lessonIdDict[lessonId]['startTime'] < 36000:
                 try:
                     server_response = await recv_json(websocket)
                 except:
-                    self.msgmgr.sendMsg(f"{self.lessonIdDict[lessonId]['header']}\n消息: 连接断开")
+                    await asyncio.to_thread(self.msgmgr.sendMsg, f"{self.lessonIdDict[lessonId]['header']}\n消息: 连接断开")
                     break
-                op=server_response['op']
+                op = server_response['op']
                 if op in ["hello", "fetchtimeline"]:
                     reversed_timeline = list(reversed(server_response['timeline']))
                     for item in reversed_timeline:
                         if 'pres' in item:
-                            if flag_ppt==0 and self.lessonIdDict[lessonId]['presentation'] != item['pres']:
+                            if flag_ppt == 0 and self.lessonIdDict[lessonId]['presentation'] != item['pres']:
                                 del_dict()
-                                self.msgmgr.sendMsg(f"{self.lessonIdDict[lessonId]['header']}\n消息: 课件更新")
-                            self.lessonIdDict[lessonId]['presentation']=item['pres']
+                                await asyncio.to_thread(self.msgmgr.sendMsg, f"{self.lessonIdDict[lessonId]['header']}\n消息: 课件更新")
+                            self.lessonIdDict[lessonId]['presentation'] = item['pres']
                             self.lessonIdDict[lessonId]['header'] = re.sub(r'PPT编号: .*?\n', f"PPT编号: {self.lessonIdDict[lessonId]['presentation']}\n", self.lessonIdDict[lessonId]['header'])
-                            self.lessonIdDict[lessonId]['si']=item['si']
+                            self.lessonIdDict[lessonId]['si'] = item['si']
                             break
                     if server_response.get('presentation'):
-                        if flag_ppt==0 and self.lessonIdDict[lessonId]['presentation'] != server_response['presentation']:
+                        if flag_ppt == 0 and self.lessonIdDict[lessonId]['presentation'] != server_response['presentation']:
                             del_dict()
-                            self.msgmgr.sendMsg(f"{self.lessonIdDict[lessonId]['header']}\n消息: 课件更新")
-                        self.lessonIdDict[lessonId]['presentation']=server_response['presentation']
+                            await asyncio.to_thread(self.msgmgr.sendMsg, f"{self.lessonIdDict[lessonId]['header']}\n消息: 课件更新")
+                        self.lessonIdDict[lessonId]['presentation'] = server_response['presentation']
                         self.lessonIdDict[lessonId]['header'] = re.sub(r'PPT编号: .*?\n', f"PPT编号: {self.lessonIdDict[lessonId]['presentation']}\n", self.lessonIdDict[lessonId]['header'])
                     if server_response.get('slideindex'):
-                        self.lessonIdDict[lessonId]['si']=server_response['slideindex']
+                        self.lessonIdDict[lessonId]['si'] = server_response['slideindex']
                     if server_response.get('unlockedproblem'):
-                        self.lessonIdDict[lessonId]['unlockedproblem']=server_response['unlockedproblem']
+                        self.lessonIdDict[lessonId]['unlockedproblem'] = server_response['unlockedproblem']
                 elif op in ["showpresentation", "presentationupdated", "presentationcreated", "showfinished"]:
                     if server_response.get('presentation'):
-                        if flag_ppt==0 and self.lessonIdDict[lessonId]['presentation'] != server_response['presentation']:
+                        if flag_ppt == 0 and self.lessonIdDict[lessonId]['presentation'] != server_response['presentation']:
                             del_dict()
-                            self.msgmgr.sendMsg(f"{self.lessonIdDict[lessonId]['header']}\n消息: 课件更新")
-                        self.lessonIdDict[lessonId]['presentation']=server_response['presentation']
+                            await asyncio.to_thread(self.msgmgr.sendMsg, f"{self.lessonIdDict[lessonId]['header']}\n消息: 课件更新")
+                        self.lessonIdDict[lessonId]['presentation'] = server_response['presentation']
                         self.lessonIdDict[lessonId]['header'] = re.sub(r'PPT编号: .*?\n', f"PPT编号: {self.lessonIdDict[lessonId]['presentation']}\n", self.lessonIdDict[lessonId]['header'])
                     if server_response.get('slideindex'):
-                        self.lessonIdDict[lessonId]['si']=server_response['slideindex']
+                        self.lessonIdDict[lessonId]['si'] = server_response['slideindex']
                     if server_response.get('unlockedproblem'):
-                        self.lessonIdDict[lessonId]['unlockedproblem']=server_response['unlockedproblem']
+                        self.lessonIdDict[lessonId]['unlockedproblem'] = server_response['unlockedproblem']
                 elif op in ["slidenav"]:
                     if server_response['slide'].get('pres'):
-                        if flag_ppt==0 and self.lessonIdDict[lessonId]['presentation'] != server_response['slide']['pres']:
+                        if flag_ppt == 0 and self.lessonIdDict[lessonId]['presentation'] != server_response['slide']['pres']:
                             del_dict()
-                            self.msgmgr.sendMsg(f"{self.lessonIdDict[lessonId]['header']}\n消息: 课件更新")
-                        self.lessonIdDict[lessonId]['presentation']=server_response['slide']['pres']
+                            await asyncio.to_thread(self.msgmgr.sendMsg, f"{self.lessonIdDict[lessonId]['header']}\n消息: 课件更新")
+                        self.lessonIdDict[lessonId]['presentation'] = server_response['slide']['pres']
                         self.lessonIdDict[lessonId]['header'] = re.sub(r'PPT编号: .*?\n', f"PPT编号: {self.lessonIdDict[lessonId]['presentation']}\n", self.lessonIdDict[lessonId]['header'])
                     if server_response['slide'].get('si'):
-                        self.lessonIdDict[lessonId]['si']=server_response['slide']['si']
+                        self.lessonIdDict[lessonId]['si'] = server_response['slide']['si']
                     if server_response.get('unlockedproblem'):
-                        self.lessonIdDict[lessonId]['unlockedproblem']=server_response['unlockedproblem']
+                        self.lessonIdDict[lessonId]['unlockedproblem'] = server_response['unlockedproblem']
                 elif op in ["unlockproblem", "extendtime"]:
                     if server_response['problem'].get('pres'):
-                        if flag_ppt==0 and self.lessonIdDict[lessonId]['presentation'] != server_response['problem']['pres']:
+                        if flag_ppt == 0 and self.lessonIdDict[lessonId]['presentation'] != server_response['problem']['pres']:
                             del_dict()
-                            self.msgmgr.sendMsg(f"{self.lessonIdDict[lessonId]['header']}\n消息: 课件更新")
-                        self.lessonIdDict[lessonId]['presentation']=server_response['problem']['pres']
+                            await asyncio.to_thread(self.msgmgr.sendMsg, f"{self.lessonIdDict[lessonId]['header']}\n消息: 课件更新")
+                        self.lessonIdDict[lessonId]['presentation'] = server_response['problem']['pres']
                         self.lessonIdDict[lessonId]['header'] = re.sub(r'PPT编号: .*?\n', f"PPT编号: {self.lessonIdDict[lessonId]['presentation']}\n", self.lessonIdDict[lessonId]['header'])
                     if server_response['problem'].get('si'):
-                        self.lessonIdDict[lessonId]['si']=server_response['problem']['si']
+                        self.lessonIdDict[lessonId]['si'] = server_response['problem']['si']
                     if server_response.get('unlockedproblem'):
-                        self.lessonIdDict[lessonId]['unlockedproblem']=server_response['unlockedproblem']
-                    self.lessonIdDict[lessonId]['problemId']=server_response['problem']['prob']
+                        self.lessonIdDict[lessonId]['unlockedproblem'] = server_response['unlockedproblem']
+                    self.lessonIdDict[lessonId]['problemId'] = server_response['problem']['prob']
                     problemType = {1: "单选题", 2: "多选题", 3: "投票题", 4: "填空题", 5: "主观题"}.get(self.lessonIdDict[lessonId]['problems'][self.lessonIdDict[lessonId]['problemId']]['problemType'], "其它题型")
                     text_result = f"PPT: 第{self.lessonIdDict[lessonId]['problems'][self.lessonIdDict[lessonId]['problemId']]['index']}页 {problemType} {fmt_num(self.lessonIdDict[lessonId]['problems'][self.lessonIdDict[lessonId]['problemId']].get('score', 0))}分\n问题: {self.lessonIdDict[lessonId]['problems'][self.lessonIdDict[lessonId]['problemId']]['body']}"
                     answer = self.lessonIdDict[lessonId]['problems'][self.lessonIdDict[lessonId]['problemId']].get('llm_answer', [])
@@ -616,37 +588,55 @@ class yuketang:
                         text_result += f"\n答案: {answer_text}"
                     else:
                         text_result += "\n答案: 暂无"
-                    self.msgmgr.sendMsg(f"{self.lessonIdDict[lessonId]['header']}\n解锁问题:\n{text_result}")
+                    await asyncio.to_thread(self.msgmgr.sendMsg, f"{self.lessonIdDict[lessonId]['header']}\n解锁问题:\n{text_result}")
                     if self.an:
                         await asyncio.sleep(randint(5, 10))
-                        self.answer(lessonId)
+                        await asyncio.to_thread(self.answer, lessonId)
                 elif op in ["lessonfinished"]:
-                    self.msgmgr.sendMsg(f"{self.lessonIdDict[lessonId]['header']}\n消息: 下课了")
+                    await asyncio.to_thread(self.msgmgr.sendMsg, f"{self.lessonIdDict[lessonId]['header']}\n消息: 下课了")
                     break
-                if flag_ppt==1 and self.lessonIdDict[lessonId].get('presentation') is not None:
-                    flag_ppt=0
-                    await self.fetch_presentation(lessonId)
-                if flag_si==1 and self.lessonIdDict[lessonId].get('si') is not None and self.lessonIdDict[lessonId].get('covers') is not None and self.lessonIdDict[lessonId]['si'] in self.lessonIdDict[lessonId]['covers']:
-                    self.msgmgr.sendMsg(f"{self.lessonIdDict[lessonId]['header']}\n消息: 正在播放PPT第{self.lessonIdDict[lessonId]['si']}页")
+                if flag_ppt == 1 and self.lessonIdDict[lessonId].get('presentation') is not None:
+                    flag_ppt = 0
+                    asyncio.create_task(self.fetch_presentation(lessonId))
+                if flag_si == 1 and self.lessonIdDict[lessonId].get('si') is not None and self.lessonIdDict[lessonId].get('covers') is not None and self.lessonIdDict[lessonId]['si'] in self.lessonIdDict[lessonId]['covers']:
+                    await asyncio.to_thread(self.msgmgr.sendMsg, f"{self.lessonIdDict[lessonId]['header']}\n消息: 正在播放PPT第{self.lessonIdDict[lessonId]['si']}页")
                     if self.si:
                         del self.lessonIdDict[lessonId]['si']
                     else:
-                        flag_si=0
-            self.msgmgr.sendMsg(f"{self.lessonIdDict[lessonId]['header']}\n消息: 连接关闭")
+                        flag_si = 0
+            await asyncio.to_thread(self.msgmgr.sendMsg, f"{self.lessonIdDict[lessonId]['header']}\n消息: 连接关闭")
             del self.lessonIdDict[lessonId]
 
     async def lesson_attend(self):
-        tasks = [asyncio.create_task(self.ws_lesson(lessonId)) for lessonId in self.lessonIdNewList]
-        asyncio.gather(*tasks)
+        if not self.lessonIdNewList:
+            return
+        coros = [self.ws_lesson(lessonId) for lessonId in self.lessonIdNewList]
         self.lessonIdNewList = []
+        results = await asyncio.gather(*coros, return_exceptions=True)
+        for r in results:
+            if isinstance(r, Exception):
+                print(f"ws_lesson 任务异常: {r}")
+
+async def _handle_ykt_once(ykt):
+    await ykt.get_cookie()
+    await asyncio.to_thread(ykt.join_classroom)
+    got, to_close_ids = await asyncio.to_thread(ykt.get_lesson)
+    if got:
+        await asyncio.to_thread(ykt.lesson_checkin)
+
+    for lessonId in to_close_ids:
+        ws = ykt.lessonIdDict.get(lessonId, {}).get('websocket')
+        if ws is not None:
+            try:
+                await ws.close()
+            except Exception as e:
+                print(f"关闭 websocket 失败: {e}")
+        ykt.lessonIdDict.pop(lessonId, None)
+
+    await ykt.lesson_attend()
 
 async def ykt_users():
     ykts = [yuketang(user) for user in users if user['enabled']]
     while True:
-        for ykt in ykts:
-            await ykt.get_cookie()
-            ykt.join_classroom()
-            if ykt.get_lesson():
-                ykt.lesson_checkin()
-            await ykt.lesson_attend()
+        await asyncio.gather(*(_handle_ykt_once(ykt) for ykt in ykts), return_exceptions=True)
         await asyncio.sleep(30)
