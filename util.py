@@ -8,10 +8,10 @@ import freetype
 import math
 import qrcode
 from pyzbar.pyzbar import decode
-from PIL import Image
+from PIL import Image, ImageDraw, ImageFont
 from datetime import datetime, timedelta
 from pytz import timezone
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 current_dir = os.path.dirname(os.path.abspath(__file__))
 os.chdir(current_dir)
@@ -23,22 +23,62 @@ timeout = config['util']['timeout']
 threads = config['util']['threads']
 tz = timezone(config['util']['timezone'])
 
-def download_qrcode(url):
+def download_qrcode(url, name):
     try:
-        res=requests.get(url, timeout=timeout)
+        res = requests.get(url, timeout=timeout)
     except Exception as e:
-        print(f"下载登录二维码时发生错误: {e}")
+        print(f"[{name}]\n下载登录二维码时发生错误: {e}")
         return
     with open("qrcode.jpg", "wb") as f:
         f.write(res.content)
-    print("登录二维码已保存为qrcode.jpg")
+    print(f"[{name}]\n登录二维码已保存为qrcode.jpg")
     barcode_url = ''
     barcodes = decode(Image.open("qrcode.jpg"))
     for barcode in barcodes:
         barcode_url = barcode.data.decode("utf-8")
+        
     qr = qrcode.QRCode()
     qr.add_data(barcode_url)
     qr.print_ascii(invert=True)
+
+    qr = qrcode.QRCode(
+        error_correction=qrcode.constants.ERROR_CORRECT_H,
+        box_size=10,
+        border=4,
+    )
+    qr.add_data(barcode_url)
+    qr.make(fit=True)
+    qr_img = qr.make_image(fill_color="black", back_color="white").convert("RGB")
+
+    title = str(name).replace("\n", "").strip("[] \t")[:20] or "QR"
+
+    def _load_font(size):
+        try:
+            return ImageFont.truetype("msyh.ttc", size)
+        except Exception:
+            return ImageFont.load_default()
+
+    size = max(12, qr_img.width // 12)
+    font = _load_font(size)
+    draw_tmp = ImageDraw.Draw(qr_img)
+    bbox = draw_tmp.textbbox((0, 0), title, font=font)
+    tw, th = bbox[2] - bbox[0], bbox[3] - bbox[1]
+    while tw > int(qr_img.width * 0.9) and size > 8:
+        size -= 2
+        font = _load_font(size)
+        bbox = draw_tmp.textbbox((0, 0), title, font=font)
+        tw, th = bbox[2] - bbox[0], bbox[3] - bbox[1]
+
+    pad_top = max(8, qr_img.height // 20)
+    pad_between = max(6, qr_img.height // 40)
+    canvas_h = pad_top + th + pad_between + qr_img.height
+    canvas = Image.new("RGB", (qr_img.width, canvas_h), "white")
+    draw = ImageDraw.Draw(canvas)
+    x_text = (canvas.width - tw) // 2
+    y_text = pad_top
+    draw.text((x_text, y_text), title, font=font, fill="black")
+    canvas.paste(qr_img, (0, y_text + th + pad_between))
+    canvas.save("qrcode.jpg")
 
 def cookie_date(response):
     set_cookie_str = response.headers.get('Set-Cookie', '')
@@ -82,9 +122,15 @@ def download_image(item, folder, retry_delay=5, backoff=1.5, max_delay=60):
         delay = min(int(delay * backoff), max_delay)
 
 def download_images_to_folder(slides, folder):
+    futures = []
     with ThreadPoolExecutor(max_workers=threads) as executor:
         for item in slides:
-            executor.submit(download_image, item, folder)
+            futures.append(executor.submit(download_image, item, folder))
+        for f in as_completed(futures):
+            try:
+                f.result()
+            except Exception as e:
+                print(f"下载任务异常: {e}")
 
 def images_to_pdf(folder, output_path):
     if not os.path.exists(folder):
@@ -144,7 +190,6 @@ def format_json_to_text(json_data, list_data):
         if 'options' in problem_info:
             for option in problem_info['options']:
                 text_result += f"- {option['key']}: {option['value']}\n"
-        text_result += f"答案: 暂无\n"
     text_result += "已解锁问题:"
     if not index_data:
         text_result += "\n无"
