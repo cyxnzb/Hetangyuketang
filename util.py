@@ -29,7 +29,7 @@ def download_qrcode(url):
     except Exception as e:
         print(f"下载登录二维码时发生错误: {e}")
         return
-    with open("qrcode.jpg","wb") as f:
+    with open("qrcode.jpg", "wb") as f:
         f.write(res.content)
     print("登录二维码已保存为qrcode.jpg")
     barcode_url = ''
@@ -139,24 +139,24 @@ def format_json_to_text(json_data, list_data):
             index_data.append(problem_info['index'])
         text_result += "-"*20 + "\n"
         body = problem_info.get('body', '未知问题')
-        problemType = {1:"单选题", 2:"多选题", 3:"投票题", 4:"填空题", 5:"主观题"}.get(problem_info['problemType'], "其它题型")
+        problemType = {1: "单选题", 2: "多选题", 3: "投票题", 4: "填空题", 5: "主观题"}.get(problem_info['problemType'], "其它题型")
         text_result += f"PPT: 第{problem_info['index']}页 {problemType} {fmt_num(problem_info.get('score', 0))}分\n问题: {body}\n"
         if 'options' in problem_info:
             for option in problem_info['options']:
                 text_result += f"- {option['key']}: {option['value']}\n"
         text_result += f"答案: 暂无\n"
-    text_result += "已解锁问题:\n"
+    text_result += "已解锁问题:"
     if not index_data:
-        text_result += "无\n"
+        text_result += "\n无"
     else:
         for item in index_data:
-            text_result += f"- PPT第{item}页\n"
+            text_result += f"\n- PPT第{item}页"
     return text_result
 
 async def recv_json(websocket):
     server_response = await websocket.recv()
     # print(f"Received from server: {server_response}")
-    info=json.loads(server_response)
+    info = json.loads(server_response)
     return info
 
 def draw_cn_text_no_pillow(im, text, vpos, k):
@@ -362,7 +362,7 @@ def concat_vertical_cv(folder, image_type, quality, questionList=[]):
                 if idx < len(valid_files) - 1:
                     y += gap
             except Exception as e:
-                print(f"拼接失败,跳过: {p} ({e})")
+                print(f"拼接失败, 跳过: {p} ({e})")
 
         out_path = os.path.join(folder, "long.jpg")
         q = int(quality)
@@ -370,7 +370,7 @@ def concat_vertical_cv(folder, image_type, quality, questionList=[]):
         try:
             out.save(out_path, "JPEG", quality=q, optimize=True)
         except Exception as e:
-            print(f"保存长图失败(optimize=True),重试无优化: {e}")
+            print(f"保存长图失败(optimize=True), 重试无优化: {e}")
             try:
                 out.copy().save(out_path, "JPEG", quality=q)
             except Exception as e2:
@@ -387,7 +387,7 @@ def concat_vertical_cv(folder, image_type, quality, questionList=[]):
                 print(f"降质重存失败: {e}")
                 break
         if size_mb > 2 and q < 5:
-            print("质量已降至最低,仍无法满足文件大小要求")
+            print("质量已降至最低, 仍无法满足文件大小要求")
         return
 
     if image_type == 3:
@@ -450,7 +450,7 @@ def concat_vertical_cv(folder, image_type, quality, questionList=[]):
                 y_im = y + (cell_h - im.height) // 2
                 canvas.paste(im, (x_im, y_im))
             except Exception as e:
-                print(f"网格粘贴失败,跳过: {p} ({e})")
+                print(f"网格粘贴失败, 跳过: {p} ({e})")
 
         canvas.save(os.path.join(folder, "grid.jpg"), "JPEG", quality=int(quality), optimize=True)
         return
@@ -515,14 +515,14 @@ def concat_vertical_cv(folder, image_type, quality, questionList=[]):
                 y_im = y + (cell_h - im.height) // 2
                 canvas.paste(im, (x_im, y_im))
             except Exception as e:
-                print(f"网格粘贴失败,跳过: {p} ({e})")
+                print(f"网格粘贴失败, 跳过: {p} ({e})")
 
         out_path = os.path.join(folder, "rect.jpg")
         q = int(quality)
         try:
             canvas.save(out_path, "JPEG", quality=q, optimize=True)
         except Exception as e:
-            print(f"保存rect失败(optimize=True),重试无优化: {e}")
+            print(f"保存rect失败(optimize=True), 重试无优化: {e}")
             try:
                 canvas.copy().save(out_path, "JPEG", quality=q)
             except Exception as e2:
