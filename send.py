@@ -14,9 +14,12 @@ with open('config.json', 'r', encoding='utf-8') as f:
 
 timeout = config['send']['timeout']
 threads = config['send']['threads']
-services = config['send']['services']
 
 class SendManager:
+    def __init__(self, prefix, services):
+        self.prefix = prefix
+        self.services = [s for s in config['send']['services'] if s['enabled'] and s['name'] in services]
+
     def _send_wx_msg(self, msg, service):
         access_token = get_wx_token(service)
         if access_token:
@@ -63,17 +66,17 @@ class SendManager:
             send_fs_file(upload_fs_file(path, access_token, service['dataLimit']), service, access_token)
 
     def sendMsg(self, msg):
-        print(msg)
+        print(self.prefix + msg + '\n')
         tasks = []
         with ThreadPoolExecutor(max_workers=threads) as pool:
-            for s in [s for s in services if s['enabled']]:
+            for s in self.services:
                 tp = s['type']
                 if tp == 'wechat':
-                    tasks.append(pool.submit(self._send_wx_msg, msg, s))
+                    tasks.append(pool.submit(self._send_wx_msg, self.prefix + msg, s))
                 elif tp == 'dingtalk':
-                    tasks.append(pool.submit(self._send_dd_msg, msg, s))
+                    tasks.append(pool.submit(self._send_dd_msg, self.prefix + msg, s))
                 elif tp == 'feishu':
-                    tasks.append(pool.submit(self._send_fs_msg, msg, s))
+                    tasks.append(pool.submit(self._send_fs_msg, self.prefix + msg, s))
                 else:
                     continue
 
@@ -86,7 +89,7 @@ class SendManager:
     def sendImage(self, path):
         tasks = []
         with ThreadPoolExecutor(max_workers=threads) as pool:
-            for s in [s for s in services if s['enabled']]:
+            for s in self.services:
                 tp = s['type']
                 if tp == 'wechat':
                     tasks.append(pool.submit(self._send_wx_image, path, s))
@@ -106,7 +109,7 @@ class SendManager:
     def sendFile(self, path):
         tasks = []
         with ThreadPoolExecutor(max_workers=threads) as pool:
-            for s in [s for s in services if s['enabled']]:
+            for s in self.services:
                 tp = s['type']
                 if tp == 'wechat':
                     tasks.append(pool.submit(self._send_wx_file, path, s))
