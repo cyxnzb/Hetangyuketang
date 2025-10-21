@@ -364,14 +364,14 @@ class yuketang:
                 await asyncio.to_thread(download_images_to_folder, slides, ppt_id)
                 await asyncio.to_thread(images_to_pdf, ppt_id, output_pdf_path)
 
-                if self.ppt:
-                    if os.path.exists(output_pdf_path):
-                        try:
-                            await asyncio.to_thread(self.msgmgr.sendFile, output_pdf_path)
-                        except:
-                            await asyncio.to_thread(self.msgmgr.sendMsg, f"{lesson['header']}\n消息: PPT推送失败")
-                    else:
-                        await asyncio.to_thread(self.msgmgr.sendMsg, f"{lesson['header']}\n消息: 没有PPT")
+            if self.ppt:
+                if os.path.exists(output_pdf_path):
+                    try:
+                        await asyncio.to_thread(self.msgmgr.sendFile, output_pdf_path)
+                    except:
+                        await asyncio.to_thread(self.msgmgr.sendMsg, f"{lesson['header']}\n消息: PPT推送失败")
+                else:
+                    await asyncio.to_thread(self.msgmgr.sendMsg, f"{lesson['header']}\n消息: 没有PPT")
 
             problems_keys = [int(k) for k in problems.keys()]
             if not os.path.exists(os.path.join(ppt_id, "problems.txt")):
